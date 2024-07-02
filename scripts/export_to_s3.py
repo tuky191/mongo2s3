@@ -21,10 +21,10 @@ collection = db[collection_name]
 s3 = boto3.client('s3')
 bucket_name = os.environ['S3_BUCKET_NAME']
 s3_prefix = os.environ.get('S3_PREFIX', '')  # Optional, for organizing files
+checkpoint_key = f'{s3_prefix}checkpoint.txt' if s3_prefix else 'checkpoint.txt'
 
 # Define the size of each chunk to export (in documents)
 chunk_size = int(os.environ.get('CHUNK_SIZE', 1000))  # Default to 1000 if not set
-checkpoint_file = 'checkpoint.txt'
 max_retries = int(os.environ.get('MAX_RETRIES', 5))  # Default to 5 if not set
 
 def export_to_s3(file_path, chunk_number):
@@ -33,14 +33,14 @@ def export_to_s3(file_path, chunk_number):
     print(f'Uploaded {file_name} to S3')
 
 def get_last_checkpoint():
-    if os.path.exists(checkpoint_file):
-        with open(checkpoint_file, 'r') as f:
-            return f.read().strip()
-    return None
+    try:
+        obj = s3.get_object(Bucket=bucket_name, Key=checkpoint_key)
+        return obj['Body'].read().decode('utf-8').strip()
+    except s3.exceptions.NoSuchKey:
+        return None
 
 def save_checkpoint(last_timestamp):
-    with open(checkpoint_file, 'w') as f:
-        f.write(last_timestamp)
+    s3.put_object(Bucket=bucket_name, Key=checkpoint_key, Body=last_timestamp)
 
 def get_cursor(last_timestamp=None):
     retries = 0
