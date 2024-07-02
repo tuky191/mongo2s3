@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "mongodb-to-s3"
+version = "0.1.0"
+description = "A script to export data from MongoDB to S3 in Parquet format"
+authors = ["Your Name <you@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+pymongo = "^4.1"
+boto3 = "^1.21"
+pandas = "^1.4"
+pyarrow = "^7.0"
+
+[tool.poetry.dev-dependencies]
