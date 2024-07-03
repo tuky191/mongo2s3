@@ -8,24 +8,13 @@ import time
 from tqdm import tqdm
 
 # Set up your DocumentDB connection using environment variables or default values
-mongodb_uri = os.getenv('MONGODB_URI', 'mongodb://foundation:PASSWORD@foundation-indexed-918816454019.us-east-1.docdb-elastic.amazonaws.com')
-mongodb_username = os.getenv('MONGODB_USERNAME', 'foundation')
-mongodb_password = os.getenv('MONGODB_PASSWORD', 'PASSWORD')
-database_name = os.getenv('DATABASE_NAME', 'foundation')
-collection_name = os.getenv('COLLECTION_NAME', 'txs-index-address')
-tls_ca_file = os.getenv('TLS_CA_FILE', '/app/SFSRootCAG2.pem')
+mongodb_uri = os.getenv('MONGODB_URI', 'mongodb://foundation:PASSWORD@foundation-indexed-918816454019.us-east-1.docdb-elastic.amazonaws.com/?tls=true&tlsCAFile=/app/SFSRootCAG2.pem&tlsAllowInvalidHostnames=true&authMechanism=DEFAULT&authSource=foundation')
 
 # Construct the MongoDB client with the required parameters
-client = pymongo.MongoClient(
-    mongodb_uri,
-    username=mongodb_username,
-    password=mongodb_password,
-    tls=True,
-    tlsCAFile=tls_ca_file,
-    tlsAllowInvalidHostnames=True,
-    authMechanism='DEFAULT',
-    authSource=database_name
-)
+client = pymongo.MongoClient(mongodb_uri)
+
+database_name = os.getenv('DATABASE_NAME', 'foundation')
+collection_name = os.getenv('COLLECTION_NAME', 'txs-index-address')
 
 db = client[database_name]
 collection = db[collection_name]
@@ -72,8 +61,13 @@ last_timestamp = get_last_checkpoint()
 cursor = get_cursor(last_timestamp)
 chunk = []
 
+# Use precise count
+# total_docs = collection.count_documents({})
+
+# Use approximate count
+total_docs = collection.estimated_document_count()
+
 try:
-    total_docs = collection.estimated_document_count({})
     with tqdm(total=total_docs, desc="Exporting data") as pbar:
         while True:
             chunk = list(cursor)
