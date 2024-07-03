@@ -6,7 +6,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import time
 from tqdm import tqdm
-
+from pprint import pprint
+import sys
+import datetime
+from dateutil.parser import isoparse
 # Set up your DocumentDB connection using environment variables or default values
 mongodb_uri = os.getenv('MONGODB_URI', 'mongodb://foundation:PASSWORD@foundation-indexed-918816454019.us-east-1.docdb-elastic.amazonaws.com/?tls=true&tlsCAFile=/app/SFSRootCAG2.pem&tlsAllowInvalidHostnames=true&authMechanism=DEFAULT&authSource=foundation')
 
@@ -26,18 +29,20 @@ s3_prefix = collection_name  # Set S3 prefix to the collection name
 checkpoint_key = f'{s3_prefix}/checkpoint.txt'  # Place checkpoint.txt in the s3prefix folder
 
 # Define the size of each chunk to export (in documents)
-chunk_size = int(os.getenv('CHUNK_SIZE', 1000))  # Default to 1000 if not set
+chunk_size = int(os.getenv('CHUNK_SIZE', 250000))  # Default to 250000 if not set
 max_retries = int(os.getenv('MAX_RETRIES', 5))  # Default to 5 if not set
 
 def export_to_s3(file_path, chunk_number):
     file_name = f'{s3_prefix}/documentdb_export_chunk_{chunk_number}.parquet'
     s3.upload_file(file_path, bucket_name, file_name)
-    print(f'Uploaded {file_name} to S3')
 
 def get_last_checkpoint():
     try:
         obj = s3.get_object(Bucket=bucket_name, Key=checkpoint_key)
-        return obj['Body'].read().decode('utf-8').strip()
+        last_timestamp = obj['Body'].read().decode('utf-8').strip()
+        if last_timestamp:
+            return isoparse(last_timestamp)
+        return None
     except s3.exceptions.NoSuchKey:
         return None
 
@@ -49,6 +54,7 @@ def get_cursor(last_timestamp=None):
     while retries < max_retries:
         try:
             if last_timestamp:
+                #pprint(f"last timestamp: {last_timestamp}")
                 return collection.find({'timestamp': {'$gte': last_timestamp}}).sort('timestamp', pymongo.ASCENDING).limit(chunk_size)
             return collection.find().sort('timestamp', pymongo.ASCENDING).limit(chunk_size)
         except Exception as e:
@@ -59,18 +65,37 @@ def get_cursor(last_timestamp=None):
 
 last_timestamp = get_last_checkpoint()
 cursor = get_cursor(last_timestamp)
-chunk = []
+chunk = list(cursor)
+initial_run = True
 
+# Handle initial run where last_timestamp is None
+if last_timestamp is None:
+    try:
+        if chunk:
+            last_timestamp = chunk[0]['timestamp'].isoformat()
+        else:
+            print("No documents found in the collection.")
+            cursor.close()
+            exit(0)
+    except Exception as e:
+        print(f'Error during initial fetch: {e}')
+        cursor.close()
+        exit(1)
 # Use precise count
 # total_docs = collection.count_documents({})
 
 # Use approximate count
 total_docs = collection.estimated_document_count()
-
+#pprint(chunk)
+#pprint(cursor)
+#sys.exit()
 try:
     with tqdm(total=total_docs, desc="Exporting data") as pbar:
         while True:
-            chunk = list(cursor)
+            if initial_run:
+                initial_run = False
+            else:
+                chunk = list(cursor)
             if not chunk:
                 break
 
@@ -84,8 +109,8 @@ try:
             last_timestamp = chunk[-1]['timestamp'].isoformat()
             save_checkpoint(last_timestamp)
             pbar.update(len(chunk))
-
-            cursor = get_cursor(last_timestamp)
+            
+            cursor = get_cursor(isoparse(last_timestamp))
 except Exception as e:
     print(f'Error: {e}')
 finally:
