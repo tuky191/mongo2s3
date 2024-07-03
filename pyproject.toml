@@ -10,5 +10,6 @@ pymongo = "^4.1"
 boto3 = "^1.21"
 pandas = "^1.4"
 pyarrow = "^7.0"
+tqdm = "^4.62.3"
 
 [tool.poetry.dev-dependencies]
