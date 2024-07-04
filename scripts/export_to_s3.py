@@ -13,7 +13,7 @@ from dateutil.parser import isoparse
 import json
 
 # Set up your DocumentDB connection using environment variables or default values
-mongodb_uri = os.getenv('MONGODB_URI', 'mongodb://foundation:PASSWORD@foundation-indexed-918816454019.us-east-1.docdb-elastic.amazonaws.com/?tls=true&tlsCAFile=/app/SFSRootCAG2.pem&tlsAllowInvalidHostnames=true&authMechanism=DEFAULT&authSource=foundation')
+mongodb_uri = os.getenv('MONGODB_URI', 'mongodb://user:PASSWORD@localhost/?tls=true&tlsCAFile=/app/SFSRootCAG2.pem&tlsAllowInvalidHostnames=true&authMechanism=DEFAULT')
 
 # Construct the MongoDB client with the required parameters
 client = pymongo.MongoClient(mongodb_uri)
