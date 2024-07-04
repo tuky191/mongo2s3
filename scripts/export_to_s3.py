@@ -8,8 +8,10 @@ import time
 from tqdm import tqdm
 from pprint import pprint
 import sys
-import datetime
+from datetime import datetime
 from dateutil.parser import isoparse
+import json
+
 # Set up your DocumentDB connection using environment variables or default values
 mongodb_uri = os.getenv('MONGODB_URI', 'mongodb://foundation:PASSWORD@foundation-indexed-918816454019.us-east-1.docdb-elastic.amazonaws.com/?tls=true&tlsCAFile=/app/SFSRootCAG2.pem&tlsAllowInvalidHostnames=true&authMechanism=DEFAULT&authSource=foundation')
 
@@ -39,23 +41,23 @@ def export_to_s3(file_path, chunk_number):
 def get_last_checkpoint():
     try:
         obj = s3.get_object(Bucket=bucket_name, Key=checkpoint_key)
-        last_timestamp = obj['Body'].read().decode('utf-8').strip()
-        if last_timestamp:
-            return isoparse(last_timestamp)
-        return None
+        checkpoint_data = obj['Body'].read().decode('utf-8').strip()
+        if checkpoint_data:
+            last_timestamp, processed_docs_count = checkpoint_data.split(',')
+            return last_timestamp, int(processed_docs_count)
+        return None, 0
     except s3.exceptions.NoSuchKey:
-        return None
+        return None, 0
 
-def save_checkpoint(last_timestamp):
-    s3.put_object(Bucket=bucket_name, Key=checkpoint_key, Body=last_timestamp)
+def save_checkpoint(last_timestamp, processed_docs_count):
+    s3.put_object(Bucket=bucket_name, Key=checkpoint_key, Body=f"{last_timestamp},{processed_docs_count}")
 
 def get_cursor(last_timestamp=None):
     retries = 0
     while retries < max_retries:
         try:
             if last_timestamp:
-                #pprint(f"last timestamp: {last_timestamp}")
-                return collection.find({'timestamp': {'$gte': last_timestamp}}).sort('timestamp', pymongo.ASCENDING).limit(chunk_size)
+                return collection.find({'timestamp': {'$gte': isoparse(last_timestamp)}}).sort('timestamp', pymongo.ASCENDING).limit(chunk_size)
             return collection.find().sort('timestamp', pymongo.ASCENDING).limit(chunk_size)
         except Exception as e:
             print(f'Cursor timeout, retrying ({retries + 1}/{max_retries})... Error: {e}')
@@ -63,7 +65,7 @@ def get_cursor(last_timestamp=None):
             time.sleep(5)  # Wait before retrying
     raise Exception('Max retries reached, unable to continue.')
 
-last_timestamp = get_last_checkpoint()
+last_timestamp, processed_docs_count = get_last_checkpoint()
 cursor = get_cursor(last_timestamp)
 chunk = list(cursor)
 initial_run = True
@@ -81,36 +83,40 @@ if last_timestamp is None:
         print(f'Error during initial fetch: {e}')
         cursor.close()
         exit(1)
-# Use precise count
-# total_docs = collection.count_documents({})
 
 # Use approximate count
 total_docs = collection.estimated_document_count()
-#pprint(chunk)
-#pprint(cursor)
-#sys.exit()
+
+def serialize_document(doc):
+    for key, value in doc.items():
+        if isinstance(value, datetime):
+            doc[key] = value.isoformat()
+    return doc
+
 try:
-    with tqdm(total=total_docs, desc="Exporting data") as pbar:
+    with tqdm(total=total_docs, desc="Exporting data", initial=processed_docs_count) as pbar:
         while True:
             if initial_run:
                 initial_run = False
             else:
                 chunk = list(cursor)
-            if not chunk:
-                break
-
-            df = pd.DataFrame(chunk)
-            table = pa.Table.from_pandas(df)
-            file_path = f'/tmp/temp_file_{last_timestamp}.parquet'
-            pq.write_table(table, file_path)
-            export_to_s3(file_path, last_timestamp)
-            os.remove(file_path)  # Clean up the local file
-
-            last_timestamp = chunk[-1]['timestamp'].isoformat()
-            save_checkpoint(last_timestamp)
-            pbar.update(len(chunk))
             
-            cursor = get_cursor(isoparse(last_timestamp))
+            # Transform the documents
+            transformed_chunk = [{'_id': doc['_id'], '_doc': json.dumps(serialize_document(doc))} for doc in chunk]
+            
+            df = pd.DataFrame(transformed_chunk)
+            table = pa.Table.from_pandas(df)
+            file_path = f'/tmp/temp_file_{processed_docs_count}.parquet'
+            pq.write_table(table, file_path)
+            export_to_s3(file_path, processed_docs_count)
+            os.remove(file_path)  # Clean up the local file
+            last_timestamp = chunk[-1]['timestamp']
+            processed_docs_count += len(chunk)
+            save_checkpoint(last_timestamp, processed_docs_count)
+            pbar.update(len(chunk))
+            if len(chunk) < chunk_size:
+                break
+            cursor = get_cursor(last_timestamp)
 except Exception as e:
     print(f'Error: {e}')
 finally:
