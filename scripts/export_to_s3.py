@@ -35,7 +35,7 @@ chunk_size = int(os.getenv('CHUNK_SIZE', 250000))  # Default to 250000 if not se
 max_retries = int(os.getenv('MAX_RETRIES', 5))  # Default to 5 if not set
 
 def export_to_s3(file_path, chunk_number):
-    file_name = f'{s3_prefix}/documentdb_export_chunk_{chunk_number}.parquet'
+    file_name = f'{s3_prefix}/export/documentdb_chunk_{chunk_number}.parquet'
     s3.upload_file(file_path, bucket_name, file_name)
 
 def get_last_checkpoint():
