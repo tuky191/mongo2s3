@@ -119,7 +119,9 @@ try:
             cursor = get_cursor(last_timestamp)
 except Exception as e:
     print(f'Error: {e}')
+    sys.exit(1)
 finally:
     cursor.close()
 
 print('Export completed.')
+sys.exit(0)
