@@ -6,12 +6,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import time
 from tqdm import tqdm
-from pprint import pprint
 import sys
 from datetime import datetime
 from dateutil.parser import isoparse
 import json
 import threading
+from pprint import pprint
 
 # Set up your DocumentDB connection using environment variables or default values
 mongodb_uri = os.getenv('MONGODB_URI', 'mongodb://user:PASSWORD@localhost/?tls=true&tlsCAFile=/app/SFSRootCAG2.pem&tlsAllowInvalidHostnames=true&authMechanism=DEFAULT')
@@ -30,8 +30,9 @@ s3_prefix = collection_name  # Set S3 prefix to the collection name
 checkpoint_key = f'{s3_prefix}/checkpoint.txt'  # Place checkpoint.txt in the s3prefix folder
 
 # Define the file size limit for each chunk (in bytes)
-file_size_limit = int(os.getenv('FILE_SIZE_LIMIT', 100 * 1024 * 1024))  # Default to 100 MB if not set
+file_size_limit = int(os.getenv('FILE_SIZE_LIMIT', 10 * 1024 * 1024))  # Default to 100 MB if not set
 max_retries = int(os.getenv('MAX_RETRIES', 5))  # Default to 5 if not set
+chunksize = 10000  # Number of documents to write per chunk
 
 def export_to_s3(file_path, chunk_number):
     file_name = f'{s3_prefix}/export/documentdb_chunk_{chunk_number}.parquet'
@@ -58,8 +59,6 @@ def open_new_file(processed_docs_count):
 def offload_file(filename):
     def offload():
         print(f"Offloading {filename}")
-        # Implement your offloading logic here (e.g., upload to S3)
-        # Simulating S3 upload
         export_to_s3(filename, processed_docs_count)
         os.remove(filename)
     
@@ -67,7 +66,7 @@ def offload_file(filename):
 
 last_timestamp, processed_docs_count = get_last_checkpoint()
 query = {} if last_timestamp is None else {'timestamp': {'$gte': isoparse(last_timestamp)}}
-cursor = collection.find(query, no_cursor_timeout=True).sort('timestamp', pymongo.ASCENDING)
+cursor = collection.find(query).sort('timestamp', pymongo.ASCENDING)
 
 # Use approximate count
 total_docs = collection.estimated_document_count()
@@ -76,52 +75,57 @@ def serialize_document(doc):
     for key, value in doc.items():
         if isinstance(value, datetime):
             doc[key] = value.isoformat()
-    return doc
+    return {'_id': doc['_id'], '_doc': json.dumps(doc)}
 
 try:
     with tqdm(total=total_docs, desc="Exporting data", initial=processed_docs_count) as pbar:
-        current_size = 0
         documents = []
+        file_path = open_new_file(processed_docs_count)
+        pqwriter = None
 
         for document in cursor:
-            # Transform and serialize the document
             serialized_doc = serialize_document(document)
             documents.append(serialized_doc)
-            current_size += len(json.dumps(serialized_doc))
 
             # Update the last processed timestamp
-            last_timestamp = document['timestamp'].isoformat()
-
-            # Check if the current file size limit is reached
-            if current_size >= file_size_limit:
-                file_path = open_new_file(processed_docs_count)
-                
-                # Write to Parquet
-                df = pd.DataFrame(documents)
-                table = pa.Table.from_pandas(df)
-                pq.write_table(table, file_path)
-                
-                offload_file(file_path)
-                
-                processed_docs_count += 1
-                save_checkpoint(last_timestamp, processed_docs_count)
-                
-                documents = []
-                current_size = 0
+            last_timestamp = document['timestamp']
 
             pbar.update(1)
 
-        # Handle the remaining documents
+            # Write to Parquet in chunks
+            if len(documents) >= chunksize:
+                df = pd.DataFrame(documents)
+                table = pa.Table.from_pandas(df)
+                if pqwriter is None:
+                    pqwriter = pq.ParquetWriter(file_path, table.schema)
+                pqwriter.write_table(table)
+                documents = []
+
+                # Check the file size
+                if os.path.getsize(file_path) >= file_size_limit:
+                    if pqwriter:
+                        pqwriter.close()
+                        pqwriter = None
+                    offload_file(file_path)
+                    save_checkpoint(last_timestamp, processed_docs_count)
+                    processed_docs_count += 1 
+                    file_path = open_new_file(processed_docs_count)
+
+        pprint(len(documents))
+        # Handle remaining documents
         if documents:
-            file_path = open_new_file(processed_docs_count)
-            
-            # Write to Parquet
             df = pd.DataFrame(documents)
             table = pa.Table.from_pandas(df)
-            pq.write_table(table, file_path)
-            
+            if pqwriter is None:
+                pqwriter = pq.ParquetWriter(file_path, table.schema)
+            pqwriter.write_table(table)
+        
+            # Close the Parquet writer if open
+            if pqwriter:
+                pqwriter.close()
+
+            # Offload the last file
             offload_file(file_path)
-            
             processed_docs_count += 1
             save_checkpoint(last_timestamp, processed_docs_count)
 
