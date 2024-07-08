@@ -12,6 +12,7 @@ from dateutil.parser import isoparse
 import json
 import threading
 from pprint import pprint
+import tempfile
 
 # Set up your DocumentDB connection using environment variables or default values
 mongodb_uri = os.getenv('MONGODB_URI', 'mongodb://user:PASSWORD@localhost/?tls=true&tlsCAFile=/app/SFSRootCAG2.pem&tlsAllowInvalidHostnames=true&authMechanism=DEFAULT')
@@ -30,12 +31,13 @@ s3_prefix = collection_name  # Set S3 prefix to the collection name
 checkpoint_key = f'{s3_prefix}/checkpoint.txt'  # Place checkpoint.txt in the s3prefix folder
 
 # Define the file size limit for each chunk (in bytes)
-file_size_limit = int(os.getenv('FILE_SIZE_LIMIT', 10 * 1024 * 1024))  # Default to 100 MB if not set
+file_size_limit = int(os.getenv('FILE_SIZE_LIMIT', 500 * 1024 * 1024))  # Default to 500 MB if not set
 max_retries = int(os.getenv('MAX_RETRIES', 5))  # Default to 5 if not set
-chunksize = 10000  # Number of documents to write per chunk
+chunksize = int(os.getenv('CHUNK_SIZE', 500))  # Default is 500 if not set
 
 def export_to_s3(file_path, chunk_number):
     file_name = f'{s3_prefix}/export/documentdb_chunk_{chunk_number}.parquet'
+    print(f"Offloading {file_name}")
     s3.upload_file(file_path, bucket_name, file_name)
 
 def get_last_checkpoint():
@@ -52,14 +54,15 @@ def get_last_checkpoint():
 def save_checkpoint(last_timestamp, processed_docs_count):
     s3.put_object(Bucket=bucket_name, Key=checkpoint_key, Body=f"{last_timestamp},{processed_docs_count}")
 
-def open_new_file(processed_docs_count):
-    filename = f"/tmp/temp_file_{processed_docs_count}.parquet"
+def open_new_file():
+    # Using tempfile.NamedTemporaryFile to create a temporary file with a random name
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as temp_file:
+        filename = temp_file.name
     return filename
 
-def offload_file(filename):
+def offload_file(filename, chunk_number):
     def offload():
-        print(f"Offloading {filename}")
-        export_to_s3(filename, processed_docs_count)
+        export_to_s3(filename, chunk_number)
         os.remove(filename)
     
     threading.Thread(target=offload).start()
@@ -80,17 +83,14 @@ def serialize_document(doc):
 try:
     with tqdm(total=total_docs, desc="Exporting data", initial=processed_docs_count) as pbar:
         documents = []
-        file_path = open_new_file(processed_docs_count)
+        file_path = open_new_file()
         pqwriter = None
 
         for document in cursor:
             serialized_doc = serialize_document(document)
             documents.append(serialized_doc)
-
-            # Update the last processed timestamp
-            last_timestamp = document['timestamp']
-
             pbar.update(1)
+            last_timestamp = document['timestamp']
 
             # Write to Parquet in chunks
             if len(documents) >= chunksize:
@@ -99,6 +99,7 @@ try:
                 if pqwriter is None:
                     pqwriter = pq.ParquetWriter(file_path, table.schema)
                 pqwriter.write_table(table)
+                processed_docs_count += len(documents)
                 documents = []
 
                 # Check the file size
@@ -106,16 +107,17 @@ try:
                     if pqwriter:
                         pqwriter.close()
                         pqwriter = None
-                    offload_file(file_path)
+                     
+                    offload_file(file_path, processed_docs_count)
                     save_checkpoint(last_timestamp, processed_docs_count)
-                    processed_docs_count += 1 
-                    file_path = open_new_file(processed_docs_count)
+                    file_path = open_new_file()
+            
 
-        pprint(len(documents))
         # Handle remaining documents
         if documents:
             df = pd.DataFrame(documents)
             table = pa.Table.from_pandas(df)
+            processed_docs_count += len(documents)
             if pqwriter is None:
                 pqwriter = pq.ParquetWriter(file_path, table.schema)
             pqwriter.write_table(table)
@@ -125,9 +127,9 @@ try:
             pqwriter.close()
 
         # Offload the last file
-        offload_file(file_path)
-        processed_docs_count += 1
         save_checkpoint(last_timestamp, processed_docs_count)
+        export_to_s3(file_path, processed_docs_count)
+        os.remove(file_path)
 
 except Exception as e:
     print(f'Error: {e}')
