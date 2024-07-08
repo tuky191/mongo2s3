@@ -120,14 +120,14 @@ try:
                 pqwriter = pq.ParquetWriter(file_path, table.schema)
             pqwriter.write_table(table)
         
-            # Close the Parquet writer if open
-            if pqwriter:
-                pqwriter.close()
+        # Close the Parquet writer if open
+        if pqwriter:
+            pqwriter.close()
 
-            # Offload the last file
-            offload_file(file_path)
-            processed_docs_count += 1
-            save_checkpoint(last_timestamp, processed_docs_count)
+        # Offload the last file
+        offload_file(file_path)
+        processed_docs_count += 1
+        save_checkpoint(last_timestamp, processed_docs_count)
 
 except Exception as e:
     print(f'Error: {e}')
